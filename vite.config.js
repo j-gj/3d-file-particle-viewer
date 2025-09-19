@@ -5,8 +5,8 @@ export default defineConfig({
   build: {
     lib: {
       entry: './main.js',
-      name: 'JSONPointCloudViewer',
-      fileName: 'json-point-cloud-viewer',
+      name: 'GLBPointCloudViewer',
+      fileName: 'glb-point-cloud-viewer',
       formats: ['es']
     },
     outDir: 'dist',

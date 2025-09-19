@@ -9,7 +9,7 @@ export default class GLBPointCloudViewer {
         backgroundColor: '#ffffff',
         autoRotate: true,
         rotationSpeed: 0.1,
-        url: 'https://example.com/particle-cloud.glb',
+        url: 'https://gmxkwskcrqq1xoty.public.blob.vercel-storage.com/particle-cloud-turbine-677500pts.glb',
         onProgress: null,
         onError: null,
     }) {

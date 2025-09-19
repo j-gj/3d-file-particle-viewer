@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { MeshoptDecoder } from 'three/examples/jsm/libs/meshopt_decoder.module.js';
 
 export default class GLBPointCloudViewer {
     constructor(containerElement, options = {
@@ -8,7 +10,7 @@ export default class GLBPointCloudViewer {
         backgroundColor: '#ffffff',
         autoRotate: true,
         rotationSpeed: 0.1,
-        url: 'https://example.com/particle-cloud.glb',
+        url: 'https://gmxkwskcrqq1xoty.public.blob.vercel-storage.com/particle-cloud-turbine-677500pts.glb',
         onProgress: null,
         onError: null,
     }) {
@@ -22,7 +24,7 @@ export default class GLBPointCloudViewer {
         this.particleTexture = this.createParticleTexture();
         this.animationId = null;
         this.resizeObserver = null;
-        this.worker = null;
+        this.loader = new GLTFLoader();
 
         this.settings = {
             url: options.url,
@@ -70,8 +72,8 @@ export default class GLBPointCloudViewer {
         // Setup resize observer for container changes
         this.setupResizeObserver();
 
-        // Setup Web Worker
-        this.setupWorker();
+        // Setup GLTFLoader with MeshoptDecoder for worker-based decompression
+        this.setupLoader();
 
         // Load the point cloud from URL
         this.loadGLBPointCloudFromURL();
@@ -132,201 +134,12 @@ export default class GLBPointCloudViewer {
         }
     }
 
-    setupWorker() {
-        // Create inline worker for GLB processing
-        const workerCode = `
-            let THREE;
-            let GLTFLoader;
-
-            // Import Three.js modules in worker
-            importScripts('https://cdn.jsdelivr.net/npm/three@0.158.0/build/three.min.js');
-            
-            // Import GLTFLoader
-            self.onmessage = async function(e) {
-                const { arrayBuffer, chunkSize = 5000 } = e.data;
-                
-                try {
-                    // Create loader
-                    const loader = new THREE.GLTFLoader();
-                    
-                    // Parse GLB in worker
-                    loader.parse(arrayBuffer, '', (gltf) => {
-                        // Find point cloud object
-                        let pointCloudObject = null;
-                        gltf.scene.traverse((child) => {
-                            if (child instanceof THREE.Points) {
-                                pointCloudObject = child;
-                            }
-                        });
-                        
-                        if (!pointCloudObject) {
-                            self.postMessage({ 
-                                success: false, 
-                                error: 'No point cloud found in GLB file' 
-                            });
-                            return;
-                        }
-                        
-                        // Extract data
-                        const positions = pointCloudObject.geometry.attributes.position.array;
-                        const metadata = pointCloudObject.userData.particleViewer || {};
-                        const totalParticles = positions.length / 3;
-                        
-                        // Send initial metadata
-                        self.postMessage({
-                            type: 'metadata',
-                            success: true,
-                            metadata: metadata,
-                            totalParticles: totalParticles
-                        });
-                        
-                        // Send positions in chunks
-                        for (let i = 0; i < positions.length; i += chunkSize * 3) {
-                            const chunkEnd = Math.min(i + chunkSize * 3, positions.length);
-                            const chunk = positions.slice(i, chunkEnd);
-                            
-                            self.postMessage({
-                                type: 'chunk',
-                                success: true,
-                                chunk: chunk.buffer,
-                                chunkIndex: Math.floor(i / (chunkSize * 3)),
-                                totalChunks: Math.ceil(positions.length / (chunkSize * 3)),
-                                startIndex: i
-                            }, [chunk.buffer]);
-                        }
-                        
-                        // Send completion message
-                        self.postMessage({
-                            type: 'complete',
-                            success: true
-                        });
-                        
-                    }, (error) => {
-                        self.postMessage({ 
-                            success: false, 
-                            error: 'GLB parsing failed: ' + error.message 
-                        });
-                    });
-                    
-                } catch (error) {
-                    self.postMessage({ 
-                        success: false, 
-                        error: 'Worker error: ' + error.message 
-                    });
-                }
-            };
-        `;
-
-        const blob = new Blob([workerCode], { type: 'application/javascript' });
-        this.worker = new Worker(URL.createObjectURL(blob));
-
-        this.worker.onmessage = (e) => {
-            this.handleWorkerMessage(e.data);
-        };
-
-        this.worker.onerror = (error) => {
-            console.error('Worker error:', error);
-            if (this.settings.onError) {
-                this.settings.onError(new Error('Worker failed: ' + error.message));
-            }
-        };
-    }
-
-    handleWorkerMessage(data) {
-        if (!data.success) {
-            console.error('Worker error:', data.error);
-            if (this.settings.onError) {
-                this.settings.onError(new Error(data.error));
-            }
-            return;
-        }
-
-        switch (data.type) {
-            case 'metadata':
-                this.pointCloudData = data.metadata;
-                this.totalParticles = data.totalParticles;
-                this.initializeGeometry();
-                break;
-
-            case 'chunk':
-                this.processChunk(data);
-                break;
-
-            case 'complete':
-                this.finalizeGeometry();
-                break;
-        }
-    }
-
-    initializeGeometry() {
-        // Clear existing particles
-        if (this.particles) {
-            this.scene.remove(this.particles);
-            this.particles.geometry.dispose();
-            this.particles.material.dispose();
-        }
-
-        // Create empty geometry
-        this.geometry = new THREE.BufferGeometry();
-        this.positions = new Float32Array(this.totalParticles * 3);
-        this.currentParticleCount = 0;
-
-        // Calculate particle size
-        const originalModelSize = this.pointCloudData.originalModelSize || 1;
-        const baseSize = this.settings.particleSize * (originalModelSize / 100);
-
-        // Create material
-        const material = new THREE.PointsMaterial({
-            color: new THREE.Color(this.settings.particleColor),
-            size: baseSize,
-            sizeAttenuation: true,
-            transparent: true,
-            opacity: 0.8,
-            map: this.particleTexture,
-            alphaTest: 0.5
-        });
-
-        // Create particles with empty geometry
-        this.particles = new THREE.Points(this.geometry, material);
-        this.scene.add(this.particles);
-    }
-
-    processChunk(data) {
-        const chunk = new Float32Array(data.chunk);
-        const startIndex = data.startIndex;
-
-        // Copy chunk data to main positions array
-        for (let i = 0; i < chunk.length; i++) {
-            this.positions[startIndex + i] = chunk[i];
-        }
-
-        // Update current particle count
-        this.currentParticleCount = Math.floor((startIndex + chunk.length) / 3);
-
-        // Update geometry with current data
-        this.geometry.setAttribute('position', 
-            new THREE.BufferAttribute(this.positions.slice(0, this.currentParticleCount * 3), 3)
-        );
-        this.geometry.attributes.position.needsUpdate = true;
-
-        // Update progress
-        const progress = data.chunkIndex / data.totalChunks;
-        if (this.settings.onProgress) {
-            this.settings.onProgress(progress);
-        }
-
-        console.log(`Loaded chunk ${data.chunkIndex + 1}/${data.totalChunks} (${this.currentParticleCount.toLocaleString()} particles)`);
-    }
-
-    finalizeGeometry() {
-        console.log(`GLB loading complete: ${this.currentParticleCount.toLocaleString()} particles loaded`);
+    setupLoader() {
+        // Enable MeshoptDecoder for worker-based decompression
+        // This automatically handles heavy decompression in web workers
+        this.loader.setMeshoptDecoder(MeshoptDecoder);
         
-        // Fit camera to the completed point cloud
-        this.fitCameraToPointCloud();
-        
-        if (this.settings.onProgress) {
-            this.settings.onProgress(1.0);
-        }
+        console.log('GLTFLoader configured with MeshoptDecoder for optimal performance');
     }
 
     createParticleTexture() {
@@ -344,21 +157,28 @@ export default class GLBPointCloudViewer {
 
     async loadGLBPointCloudFromURL() {
         try {
-            console.log('Fetching GLB file:', this.settings.url);
+            console.log('Loading GLB point cloud with Meshopt decompression:', this.settings.url);
             
-            const response = await fetch(this.settings.url);
-            if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
-            }
-
-            const arrayBuffer = await response.arrayBuffer();
-            console.log('GLB file loaded, processing in worker...');
-
-            // Send to worker for processing
-            this.worker.postMessage({
-                arrayBuffer: arrayBuffer,
-                chunkSize: 5000
-            }, [arrayBuffer]);
+            this.loader.load(
+                this.settings.url,
+                (gltf) => {
+                    console.log('GLB loaded successfully, processing point cloud...');
+                    this.processGLBPointCloud(gltf);
+                },
+                (progress) => {
+                    if (this.settings.onProgress && progress.total > 0) {
+                        const percentComplete = (progress.loaded / progress.total);
+                        this.settings.onProgress(percentComplete);
+                        console.log(`Loading progress: ${(percentComplete * 100).toFixed(1)}%`);
+                    }
+                },
+                (error) => {
+                    console.error('Error loading GLB point cloud:', error);
+                    if (this.settings.onError) {
+                        this.settings.onError(error);
+                    }
+                }
+            );
 
         } catch (err) {
             console.error('Error loading GLB point cloud:', err);
@@ -366,6 +186,90 @@ export default class GLBPointCloudViewer {
                 this.settings.onError(err);
             }
         }
+    }
+
+    processGLBPointCloud(gltf) {
+        // Clear existing particles
+        if (this.particles) {
+            this.scene.remove(this.particles);
+            this.particles.geometry.dispose();
+            this.particles.material.dispose();
+        }
+
+        // Find the point cloud object in the GLB
+        let pointCloudObject = null;
+        
+        gltf.scene.traverse((child) => {
+            if (child instanceof THREE.Points) {
+                pointCloudObject = child;
+            }
+        });
+
+        if (!pointCloudObject) {
+            const error = new Error('No point cloud found in GLB file');
+            console.error(error.message);
+            if (this.settings.onError) {
+                this.settings.onError(error);
+            }
+            return;
+        }
+
+        // Extract metadata from userData
+        this.pointCloudData = pointCloudObject.userData.particleViewer || {};
+        
+        console.log(`Point cloud found with ${(pointCloudObject.geometry.attributes.position.count).toLocaleString()} particles`);
+
+        // Create optimized point cloud from GLB data
+        this.particles = this.createPointCloudFromGLB(pointCloudObject);
+
+        if (this.particles) {
+            this.scene.add(this.particles);
+            this.fitCameraToPointCloud();
+            
+            // Notify completion
+            if (this.settings.onProgress) {
+                this.settings.onProgress(1.0);
+            }
+            
+            console.log('Point cloud processing complete');
+        } else {
+            const error = new Error('Could not create point cloud from GLB data');
+            if (this.settings.onError) {
+                this.settings.onError(error);
+            }
+        }
+    }
+
+    createPointCloudFromGLB(sourcePointCloud) {
+        // Use the existing geometry directly (already decompressed by MeshoptDecoder)
+        // This is much faster than copying data around
+        const geometry = sourcePointCloud.geometry;
+
+        // Get original model size from metadata or calculate from geometry
+        let originalModelSize = 1;
+        if (this.pointCloudData.originalModelSize) {
+            originalModelSize = this.pointCloudData.originalModelSize;
+        } else {
+            geometry.computeBoundingBox();
+            const size = geometry.boundingBox.getSize(new THREE.Vector3());
+            originalModelSize = Math.max(size.x, size.y, size.z);
+        }
+
+        // Calculate particle size based on settings
+        const baseSize = this.settings.particleSize * (originalModelSize / 100);
+
+        // Create new material with current settings
+        const material = new THREE.PointsMaterial({
+            color: new THREE.Color(this.settings.particleColor),
+            size: baseSize,
+            sizeAttenuation: true,
+            transparent: true,
+            opacity: 0.8,
+            map: this.particleTexture,
+            alphaTest: 0.5
+        });
+
+        return new THREE.Points(geometry, material);
     }
 
     fitCameraToPointCloud() {
@@ -479,7 +383,10 @@ export default class GLBPointCloudViewer {
     }
 
     getParticleCount() {
-        return this.currentParticleCount || 0;
+        if (this.particles && this.particles.geometry.attributes.position) {
+            return this.particles.geometry.attributes.position.count;
+        }
+        return 0;
     }
 
     destroy() {
@@ -487,12 +394,6 @@ export default class GLBPointCloudViewer {
         if (this.animationId) {
             cancelAnimationFrame(this.animationId);
             this.animationId = null;
-        }
-
-        // Terminate worker
-        if (this.worker) {
-            this.worker.terminate();
-            this.worker = null;
         }
 
         // Dispose of Three.js objects
